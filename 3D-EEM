@@ -1,0 +1,129 @@
+import os
+import re
+import numpy as np
+import pandas as pd
+import matplotlib
+matplotlib.use("Agg", force=True)
+import matplotlib.pyplot as plt
+
+matplotlib.rcParams['font.sans-serif'] = ['SimHei']
+matplotlib.rcParams['axes.unicode_minus'] = False
+
+print(" Matplotlib :", matplotlib.get_backend())
+
+# ============================
+def read_hitachi_eem(filepath):
+    """ Hitachi F-7000 EEM """
+    with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
+        lines = f.readlines()
+
+    #  Data points 
+    start_idx = None
+    for i, line in enumerate(lines):
+        if line.strip().startswith("Data points"):
+            start_idx = i + 1
+            break
+    if start_idx is None:
+        print(f"⚠️  Data points: {filepath}")
+        return None, None, None, None
+
+    data_lines = [l.strip() for l in lines[start_idx:] if l.strip()]
+
+    header_parts = re.split(r'\s+', data_lines[0])
+    ex = np.array([float(x) for x in header_parts if x != ''])
+
+    em_list = []
+    matrix = []
+    for line in data_lines[1:]:
+        parts = re.split(r'\s+', line)
+        if len(parts) < 2:
+            continue
+        try:
+            em_val = float(parts[0])
+            row_vals = []
+            for v in parts[1:]:
+                try:
+                    val = float(v)
+                    if val >= 9999 or val <= -9999:
+                        val = np.nan
+                except:
+                    val = np.nan
+                row_vals.append(val)
+            em_list.append(em_val)
+            matrix.append(row_vals)
+        except:
+            continue
+
+    em = np.array(em_list)
+    intensity = np.array(matrix)
+    return ex, em, intensity, None
+
+# ============================ 
+regions = {
+    'R1': {'Ex': (200, 250), 'Em': (250, 330)},
+    'R2': {'Ex': (200, 250), 'Em': (330, 380)},
+    'R3': {'Ex': (200, 250), 'Em': (380, 550)},
+    'R4': {'Ex': (250, 380), 'Em': (250, 380)},
+    'R5': {'Ex': (250, 450), 'Em': (380, 550)},
+}
+
+def calc_region_intensity(ex, em, intensity, region):
+    mask_ex = (ex >= region['Ex'][0]) & (ex <= region['Ex'][1])
+    mask_em = (em >= region['Em'][0]) & (em <= region['Em'][1])
+    sub_intensity = intensity[np.ix_(mask_em, mask_ex)]
+    if sub_intensity.size == 0:
+        return np.nan
+    return np.nanmean(sub_intensity)
+
+def calc_rli(ex, em, intensity):
+    """(RLI)"""
+    R = {}
+    for key, reg in regions.items():
+        R[key] = calc_region_intensity(ex, em, intensity, reg)
+    numerator = (R['R3'] + R['R5']) - (R['R1'] + R['R2'] + R['R4'])
+    denominator = sum(R.values())
+    rli = np.nan if denominator == 0 else numerator / denominator
+    return rli, R
+
+# ============================
+folder = r"E:\desktop\2\12-6"  
+save_fig_folder = os.path.join(folder, "3D-EEM")
+os.makedirs(save_fig_folder, exist_ok=True)
+
+results = []
+
+for file in os.listdir(folder):
+    if not file.lower().endswith(".txt"):
+        continue
+    path = os.path.join(folder, file)
+    ex, em, intensity, _ = read_hitachi_eem(path)
+    if ex is None:
+        print(f"⚠️ file not found")
+        continue
+
+    rli, R = calc_rli(ex, em, intensity)
+    results.append([file, rli, R['R1'], R['R2'], R['R3'], R['R4'], R['R5']])
+
+    plt.figure(figsize=(8,6))
+    plt.contourf(em, ex, intensity.T, levels=200, cmap='turbo')
+    plt.xlabel('Em (nm)')
+    plt.ylabel('Ex (nm)')
+    plt.title(f"{file} (Ex, Em)")
+    plt.colorbar(label='(a.u.)')
+
+    plt.ylim(200, 450)
+    plt.tight_layout()
+
+    save_path = os.path.join(save_fig_folder, file.replace('.TXT','_EEM.png').replace('.txt','_EEM.png'))
+    plt.savefig(save_path, dpi=300)
+    plt.close()
+    print(f"✅ {save_path}")
+
+# ============================
+df = pd.DataFrame(results, columns=['Sample','HIX','R1','R2','R3','R4','R5'])
+df = df.sort_values(by='HIX', ascending=False)
+csv_path = os.path.join(folder, "1.csv")
+df.to_csv(csv_path, index=False, encoding='utf-8-sig')
+
+print(f"\n✅  {folder}")
+print(df)
