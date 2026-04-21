@@ -1,0 +1,202 @@
+import os
+import re
+import numpy as np
+import pandas as pd
+import matplotlib
+
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+matplotlib.rcParams['font.sans-serif'] = ['SimHei'] 
+matplotlib.rcParams['axes.unicode_minus'] = False
+
+    with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
+        lines = f.readlines()
+
+    start_idx = None
+    for i, line in enumerate(lines):
+        if line.strip().startswith("Peaks"):
+            start_idx = i + 2
+            break
+
+    if start_idx is None:
+        raise ValueError(f"11")
+
+    data = []
+    for line in lines[start_idx:]:
+        parts = re.split(r'\s+', line.strip())
+        if len(parts) < 3:
+            continue
+        try:
+            ex_em = parts[1].replace(',', '').strip()
+            intensity = float(parts[2])
+            if '/' in ex_em:
+                ex, em = ex_em.split('/')
+            elif '\\' in ex_em:
+                ex, em = ex_em.split('\\')
+            else:
+                ex = parts[0]
+                em = parts[1]
+            data.append([float(ex), float(em), intensity])
+        except Exception:
+            continue
+
+    if len(data) == 0:
+        return pd.DataFrame()
+
+    df = pd.DataFrame(data, columns=['Ex', 'Em', 'Intensity'])
+    eem = df.pivot_table(index='Ex', columns='Em', values='Intensity', aggfunc='mean')
+    eem.index = eem.index.astype(float)
+    eem.columns = eem.columns.astype(float)
+    eem = eem.sort_index(axis=0).sort_index(axis=1)
+    return eem
+
+def calc_indices(eem):
+    regions = {}
+
+    def mean_region(ex_range, em_range):
+        try:
+            sub = eem.loc[(eem.index >= ex_range[0]) & (eem.index <= ex_range[1]),
+                          (eem.columns >= em_range[0]) & (eem.columns <= em_range[1])]
+            if sub.empty:
+                return np.nan
+            return sub.mean().mean()
+        except Exception:
+            return np.nan
+
+    regions['R1'] = mean_region((200, 250), (250, 330))
+    regions['R2'] = mean_region((200, 250), (330, 380))
+    regions['R3'] = mean_region((200, 250), (380, 550))
+    regions['R4'] = mean_region((250, 380), (250, 380))
+    regions['R5'] = mean_region((250, 450), (380, 550))
+
+    def get_ex_row_for_hi(eem, ex_target=254):
+        if eem.empty:
+            return None, None, "eem_empty"
+
+        ex_values = eem.index.to_numpy()
+        if ex_target in ex_values:
+            row = eem.loc[ex_target]
+            return row, 'direct', None
+
+        try:
+            eem_interp = eem.reindex(eem.index.union([ex_target])).sort_index()
+            eem_interp = eem_interp.interpolate(method='index', axis=0, limit_direction='both')
+            if ex_target in eem_interp.index:
+                row = eem_interp.loc[ex_target]
+                return row, 'interpolated', None
+        except Exception as e:
+            pass
+
+        diffs = np.abs(ex_values - ex_target)
+        order = np.argsort(diffs)
+        for idx in order:
+            ex = ex_values[idx]
+            row = eem.loc[ex]
+            low_region = row[(row.index >= 300) & (row.index <= 345)].dropna()
+            high_region = row[(row.index >= 435) & (row.index <= 480)].dropna()
+            if not low_region.empty and not high_region.empty:
+                return row, f'nearest({ex})', None
+        return None, None, "no_suitable_ex"
+
+    HI = np.nan
+    try:
+        row, method, reason = get_ex_row_for_hi(eem, ex_target=254)
+        if row is None:
+            print(f"⚠️")
+            return regions, np.nan
+
+        row = row.dropna()
+        low_region = row[(row.index >= 300) & (row.index <= 345)]
+        high_region = row[(row.index >= 435) & (row.index <= 480)]
+
+        if low_region.empty or high_region.empty:
+            print(f"⚠️")
+            return regions, np.nan
+
+        low_mean = low_region.mean()
+        high_mean = high_region.mean()
+        if low_mean == 0:
+            print(f"⚠️")
+            return regions, np.nan
+
+        HI = high_mean / low_mean
+        if method == 'interpolated':
+        elif method and method.startswith('nearest'):
+        else:
+            # direct
+            pass
+    except Exception as e:
+        HI = np.nan
+        print(f"⚠️ HI: {e}")
+
+    return regions, HI
+
+if __name__ == "__main__":
+    folder = r"E:\desktop" 
+    save_folder = os.path.join(folder, "Humification_results-HI")
+    os.makedirs(save_folder, exist_ok=True)
+
+    results = []
+
+    for file in os.listdir(folder):
+        if not file.lower().endswith(".txt"):
+            continue
+        path = os.path.join(folder, file)
+        try:
+            eem = read_hitachi_eem(path)
+            if eem.empty:
+                print(f"⚠️: {file}")
+                results.append([file, np.nan, np.nan, np.nan, np.nan, np.nan, np.nan])
+                continue
+            regions, HI = calc_indices(eem)
+            results.append([file, HI, regions['R1'], regions['R2'], regions['R3'], regions['R4'], regions['R5']])
+        except Exception as e:
+            print(f"⚠️ : {file} -> {e}")
+            results.append([file, np.nan, np.nan, np.nan, np.nan, np.nan, np.nan])
+
+    df_hi = pd.DataFrame(results, columns=["Sample", "Humification Index", "R1", "R2", "R3", "R4", "R5"])
+    df_hi = df_hi.sort_values(by="Humification Index", ascending=False)
+
+    plt.figure(figsize=(8, 5))
+    df_plot = df_hi.copy()
+    df_plot_visual = df_plot.fillna(0)
+    hi_max = df_plot_visual['Humification Index'].max()
+    if np.isnan(hi_max) or hi_max == 0:
+        y_max = 1
+    else:
+        y_max = hi_max * 1.2
+
+    sns.barplot(x="Sample", y="Humification Index", data=df_plot_visual)
+    plt.xticks(rotation=45, ha='right')
+    plt.title("Humification Index (HI)")
+    plt.ylabel("HI = Em(435–480) / Em(300–345) at Ex≈254 nm")
+    plt.ylim(0, y_max)
+    plt.tight_layout()
+    plt.savefig(os.path.join(save_folder, "Humification_Index.png"), dpi=300)
+    plt.close()
+
+    df_long = df_plot_visual.melt(id_vars=["Sample"], value_vars=["R1", "R2", "R3", "R4", "R5"],
+                                  var_name="region", value_name="high")
+
+    plt.figure(figsize=(10, 6))
+    sns.barplot(x="Sample", y="high", hue="region", data=df_long)
+    plt.xticks(rotation=45, ha='right')
+    plt.title("compare five region")
+    plt.ylabel("high/5")
+ 
+    strength_max = df_long['high'].max()
+    if np.isnan(strength_max) or strength_max == 0:
+        s_max = 1
+    else:
+        s_max = strength_max * 1.2
+    plt.ylim(0, s_max)
+    plt.legend(title="region")
+    plt.tight_layout()
+    plt.savefig(os.path.join(save_folder, "1.png"), dpi=300)
+    plt.close()
+
+    print(f"✅ save: {save_folder}")
+    print("\nHIX：")
+    print(df_hi)
